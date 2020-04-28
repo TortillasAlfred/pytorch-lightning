@@ -31,7 +31,6 @@ from tests.base import (
     dict(val_check_interval=10000),
 ])
 def test_dataloader_config_errors(tmpdir, dataloader_options):
-    tutils.reset_seed()
 
     class CurrentTestModel(
         LightTrainDataloader,
