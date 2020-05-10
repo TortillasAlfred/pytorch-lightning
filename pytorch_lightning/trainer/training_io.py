@@ -204,7 +204,7 @@ class TrainerIOMixin(ABC):
             log.info("handling SIGUSR1")
             self.hpc_save(self.weights_save_path, self.logger)
 
-            cmd = f"sbatch {self.launch_script_path}"
+            cmd = f"sbatch --dependency=afterany:{os.environ['SLURM_JOB_ID']} {self.launch_script_path}"
 
             # requeue job
             log.info(f"requeing job from {self.launch_script_path}...")
