@@ -61,7 +61,7 @@ The trainer restores:
 You can even change the logic of your model as long as the weights and "architecture" of
 the system isn't different. If you add a layer, for instance, it might not work.
 
-At a rough level, here's what happens inside Trainer :py:mod:`pytorch_lightning.base_module.model_saving.py`:
+At a rough level, here's what happens inside Trainer :py:mod:`pytorch_lightning.base_module.saving.py`:
 
 .. code-block:: python
 
@@ -87,13 +87,12 @@ import os
 import re
 import signal
 from abc import ABC
-from argparse import Namespace
 from subprocess import call
-from typing import Union
 
 import torch
 import torch.distributed as torch_distrib
 
+import pytorch_lightning
 from pytorch_lightning import _logger as log
 from pytorch_lightning.core.lightning import LightningModule
 from pytorch_lightning.loggers import LightningLoggerBase
@@ -101,7 +100,8 @@ from pytorch_lightning.overrides.data_parallel import (
     LightningDistributedDataParallel,
     LightningDataParallel,
 )
-from pytorch_lightning.utilities import rank_zero_warn, parsing
+from pytorch_lightning.utilities import rank_zero_warn
+from pytorch_lightning.utilities.cloud_io import load as pl_load
 
 try:
     import torch_xla
@@ -111,6 +111,18 @@ except ImportError:
     XLA_AVAILABLE = False
 else:
     XLA_AVAILABLE = True
+
+try:
+    import horovod.torch as hvd
+except ImportError:
+    HOROVOD_AVAILABLE = False
+else:
+    HOROVOD_AVAILABLE = True
+
+try:
+    from omegaconf import Container
+except ImportError:
+    Container = None
 
 
 class TrainerIOMixin(ABC):
@@ -123,16 +135,20 @@ class TrainerIOMixin(ABC):
     resume_from_checkpoint: ...
     use_ddp: bool
     use_ddp2: bool
+    use_horovod: bool
     checkpoint_callback: ...
-    proc_rank: int
+    global_rank: int
     weights_save_path: str
-    logger: Union[LightningLoggerBase, bool]
+    logger: LightningLoggerBase
     early_stop_callback: ...
     lr_schedulers: ...
     optimizers: ...
     on_tpu: bool
     num_training_batches: int
     accumulate_grad_batches: int
+    use_amp: bool
+    use_native_amp: bool
+    scaler: ...
 
     def get_model(self):
         is_dp_module = isinstance(
@@ -176,6 +192,10 @@ class TrainerIOMixin(ABC):
             # wait for all processes to catch up
             torch_xla.core.xla_model.rendezvous("pl.TrainerIOMixin.restore_weights")
 
+        elif self.use_horovod:
+            # wait for all processes to catch up
+            hvd.join()
+
         # clear cache after restore
         if self.on_gpu:
             torch.cuda.empty_cache()
@@ -190,7 +210,7 @@ class TrainerIOMixin(ABC):
             job_name = os.environ["SLURM_JOB_NAME"]
             if job_name != "bash":
                 on_slurm = True
-        except Exception as e:
+        except Exception:
             pass
 
         if on_slurm:
@@ -199,7 +219,7 @@ class TrainerIOMixin(ABC):
             signal.signal(signal.SIGTERM, self.term_handler)
 
     def sig_handler(self, signum, frame):  # pragma: no-cover
-        if self.proc_rank == 0:
+        if self.is_global_zero:
             # save weights
             log.info("handling SIGUSR1")
             self.hpc_save(self.weights_save_path, self.logger)
@@ -243,21 +263,18 @@ class TrainerIOMixin(ABC):
         torch.save(checkpoint, tmp_path)
         os.replace(tmp_path, filepath)
 
-    def save_checkpoint(self, filepath):
-        checkpoint = self.dump_checkpoint()
+    def save_checkpoint(self, filepath, weights_only: bool = False):
+        checkpoint = self.dump_checkpoint(weights_only)
 
-        if self.proc_rank == 0:
+        if self.is_global_zero:
             # do the actual save
             try:
                 self._atomic_save(checkpoint, filepath)
-            except AttributeError as e:
-                if "hparams" in checkpoint:
-                    del checkpoint["hparams"]
-                rank_zero_warn(
-                    "warning, `hparams` dropped from checkpoint."
-                    f" An attribute is not picklable {e}"
-                )
-
+            except AttributeError as err:
+                if LightningModule.CHECKPOINT_HYPER_PARAMS_KEY in checkpoint:
+                    del checkpoint[LightningModule.CHECKPOINT_HYPER_PARAMS_KEY]
+                rank_zero_warn('Warning, `module_arguments` dropped from checkpoint.'
+                               f' An attribute is not picklable {err}')
                 self._atomic_save(checkpoint, filepath)
 
     def restore(self, checkpoint_path: str, on_gpu: bool):
@@ -274,9 +291,7 @@ class TrainerIOMixin(ABC):
         #     checkpoint = torch.load(checkpoint_path)
         # else:
         # load on CPU first
-        checkpoint = torch.load(
-            checkpoint_path, map_location=lambda storage, loc: storage
-        )
+        checkpoint = pl_load(checkpoint_path, map_location=lambda storage, loc: storage)
 
         # load model state
         model = self.get_model()
@@ -301,65 +316,61 @@ class TrainerIOMixin(ABC):
         # load training state (affects trainer only)
         self.restore_training_state(checkpoint)
 
-    def dump_checkpoint(self):
+    def dump_checkpoint(self, weights_only: bool = False) -> dict:
+        """Creating model checkpoint.
+
+        Args:
+            weights_only: saving model weights only
+
+        Return:
+             structured dictionary
+        """
         checkpoint = {
-            "epoch": self.current_epoch + 1,
-            "global_step": self.global_step + 1,
+            'epoch': self.current_epoch + 1,
+            'global_step': self.global_step + 1,
+            'pytorch-ligthning_version': pytorch_lightning.__version__,
         }
 
-        if (
-            self.checkpoint_callback is not None
-            and self.checkpoint_callback is not False
-        ):
-            checkpoint["checkpoint_callback_best"] = self.checkpoint_callback.best
+        if not weights_only:
+            if self.checkpoint_callback:
+                checkpoint['checkpoint_callback_best_model_score'] = self.checkpoint_callback.best_model_score
+                checkpoint['checkpoint_callback_best_model_path'] = self.checkpoint_callback.best_model_path
 
-        if (
-            self.early_stop_callback is not None
-            and self.checkpoint_callback is not False
-        ):
-            checkpoint["early_stop_callback_wait"] = self.early_stop_callback.wait
-            checkpoint[
-                "early_stop_callback_patience"
-            ] = self.early_stop_callback.patience
+            if self.early_stop_callback:
+                checkpoint['early_stop_callback_wait'] = self.early_stop_callback.wait
+                checkpoint['early_stop_callback_patience'] = self.early_stop_callback.patience
 
-        # save optimizers
-        optimizer_states = []
-        for i, optimizer in enumerate(self.optimizers):
-            optimizer_states.append(optimizer.state_dict())
+            # save optimizers
+            optimizer_states = []
+            for i, optimizer in enumerate(self.optimizers):
+                optimizer_states.append(optimizer.state_dict())
 
-        checkpoint["optimizer_states"] = optimizer_states
+            checkpoint['optimizer_states'] = optimizer_states
 
-        # save lr schedulers
-        lr_schedulers = []
-        for scheduler in self.lr_schedulers:
-            lr_schedulers.append(scheduler["scheduler"].state_dict())
+            # save lr schedulers
+            lr_schedulers = []
+            for scheduler in self.lr_schedulers:
+                lr_schedulers.append(scheduler['scheduler'].state_dict())
 
-        checkpoint["lr_schedulers"] = lr_schedulers
+            checkpoint['lr_schedulers'] = lr_schedulers
 
-        # add the hparams and state_dict from the model
+            # save native amp scaling
+            if self.use_amp and self.use_native_amp:
+                checkpoint['native_amp_scaling_state'] = self.scaler.state_dict()
+
+        # add the module_arguments and state_dict from the model
         model = self.get_model()
 
         checkpoint["state_dict"] = model.state_dict()
 
-        # restore native amp scaling
-        if (
-            self.use_amp
-            and self.use_native_amp
-            and "native_amp_scaling_state" in checkpoint
-        ):
-            checkpoint["native_amp_scaling_state"] = self.scaler.state_dict()
-
-        if hasattr(model, "hparams"):
-            parsing.clean_namespace(model.hparams)
-            is_namespace = isinstance(model.hparams, Namespace)
-            checkpoint["hparams"] = (
-                vars(model.hparams) if is_namespace else model.hparams
-            )
-            checkpoint["hparams_type"] = "namespace" if is_namespace else "dict"
-        else:
-            rank_zero_warn(
-                "Did not find hyperparameters at model hparams. Saving checkpoint without hyperparameters."
-            )
+        if model.hparams:
+            if hasattr(model, '_hparams_name'):
+                checkpoint[LightningModule.CHECKPOINT_HYPER_PARAMS_NAME] = model._hparams_name
+            # add arguments to the checkpoint
+            checkpoint[LightningModule.CHECKPOINT_HYPER_PARAMS_KEY] = model.hparams
+            if Container is not None:
+                if isinstance(model.hparams, Container):
+                    checkpoint[LightningModule.CHECKPOINT_HYPER_PARAMS_TYPE] = type(model.hparams)
 
         # give the model a chance to add a few things
         model.on_save_checkpoint(checkpoint)
@@ -392,23 +403,30 @@ class TrainerIOMixin(ABC):
         :param checkpoint:
         :return:
         """
-        if (
-            self.checkpoint_callback is not None
-            and self.checkpoint_callback is not False
-        ):
-            self.checkpoint_callback.best = checkpoint["checkpoint_callback_best"]
+        if 'optimizer_states' not in checkpoint or 'lr_schedulers' not in checkpoint:
+            raise KeyError(
+                'Trying to restore training state but checkpoint contains only the model.'
+                ' This is probably due to `ModelCheckpoint.save_weights_only` being set to `True`.'
+            )
 
-        if (
-            self.early_stop_callback is not None
-            and self.early_stop_callback is not False
-        ):
-            self.early_stop_callback.wait = checkpoint["early_stop_callback_wait"]
-            self.early_stop_callback.patience = checkpoint[
-                "early_stop_callback_patience"
-            ]
+        if self.checkpoint_callback:
+            if 'checkpoint_callback_best_model_score' in checkpoint:
+                self.checkpoint_callback.best_model_score = checkpoint['checkpoint_callback_best_model_score']
+            else:
+                # Old naming until version 0.7.6
+                rank_zero_warn(
+                    'Loading a checkpoint created with an old version of Lightning; '
+                    'this will not be supported in the future.'
+                )
+                self.checkpoint_callback.best_model_score = checkpoint['checkpoint_callback_best']
+            self.checkpoint_callback.best_model_path = checkpoint['checkpoint_callback_best_model_path']
 
-        self.global_step = checkpoint["global_step"]
-        self.current_epoch = checkpoint["epoch"]
+        if self.early_stop_callback:
+            self.early_stop_callback.wait = checkpoint['early_stop_callback_wait']
+            self.early_stop_callback.patience = checkpoint['early_stop_callback_patience']
+
+        self.global_step = checkpoint['global_step']
+        self.current_epoch = checkpoint['epoch']
 
         # Division deals with global step stepping once per accumulated batch
         # Inequality deals with different global step for odd vs even num_training_batches
@@ -467,14 +485,11 @@ class TrainerIOMixin(ABC):
         # TODO: fix for anything with multiprocess DP, DDP, DDP2
         try:
             self._atomic_save(checkpoint, filepath)
-        except AttributeError as e:
-            if "hparams" in checkpoint:
-                del checkpoint["hparams"]
-            rank_zero_warn(
-                "warning, `hparams` dropped from checkpoint."
-                f" An attribute is not picklable {e}"
-            )
-
+        except AttributeError as err:
+            if LightningModule.CHECKPOINT_HYPER_PARAMS_KEY in checkpoint:
+                del checkpoint[LightningModule.CHECKPOINT_HYPER_PARAMS_KEY]
+            rank_zero_warn('warning, `module_arguments` dropped from checkpoint.'
+                           f' An attribute is not picklable {err}')
             self._atomic_save(checkpoint, filepath)
 
         return filepath

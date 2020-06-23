@@ -1,19 +1,29 @@
+.. testsetup:: *
+
+    import torch
+    from argparse import ArgumentParser, Namespace
+    from pytorch_lightning.trainer.trainer import Trainer
+    from pytorch_lightning.core.lightning import LightningModule
+    import sys
+    sys.argv = ['foo']
+
+
 Hyperparameters
 ---------------
 Lightning has utilities to interact seamlessly with the command line ArgumentParser
 and plays well with the hyperparameter optimization framework of your choice.
 
+----------
+
 ArgumentParser
 ^^^^^^^^^^^^^^
 Lightning is designed to augment a lot of the functionality of the built-in Python ArgumentParser
 
-.. code-block:: python
+.. testcode::
 
     from argparse import ArgumentParser
-
     parser = ArgumentParser()
     parser.add_argument('--layer_1_dim', type=int, default=128)
-
     args = parser.parse_args()
 
 This allows you to call your program like so:
@@ -22,6 +32,7 @@ This allows you to call your program like so:
 
     python trainer.py --layer_1_dim 64
 
+----------
 
 Argparser Best Practices
 ^^^^^^^^^^^^^^^^^^^^^^^^
@@ -35,9 +46,9 @@ We can do this as follows. First, in your LightningModule, define the arguments
 specific to that module. Remember that data splits or data paths may also be specific to
 a module (ie: if your project has a model that trains on Imagenet and another on CIFAR-10).
 
-.. code-block:: python
+.. testcode::
 
-        class LitModel(LightningModule):
+    class LitModel(LightningModule):
 
         @staticmethod
         def add_model_specific_args(parent_parser):
@@ -48,13 +59,12 @@ a module (ie: if your project has a model that trains on Imagenet and another on
 
 Now in your main trainer file, add the Trainer args, the program args, and add the model args
 
-.. code-block:: python
+.. testcode::
 
     # ----------------
     # trainer_main.py
     # ----------------
     from argparse import ArgumentParser
-
     parser = ArgumentParser()
 
     # add PROGRAM level args
@@ -66,9 +76,9 @@ Now in your main trainer file, add the Trainer args, the program args, and add t
 
     # add all the available trainer options to argparse
     # ie: now --gpus --num_nodes ... --fast_dev_run all work in the cli
-    parser = pl.Trainer.add_argparse_args(parser)
+    parser = Trainer.add_argparse_args(parser)
 
-    hparams = parser.parse_args()
+    args = parser.parse_args()
 
 Now you can call run your program like so
 
@@ -78,70 +88,112 @@ Now you can call run your program like so
 
 Finally, make sure to start the training like so:
 
-.. code-block:: bash
+.. code-block:: python
 
-    hparams = parser.parse_args()
+    # init the trainer like this
+    trainer = Trainer.from_argparse_args(args, early_stopping_callback=...)
 
-    # YES
-    model = LitModel(hparams)
-    trainer = Trainer.from_argparse_args(hparams, early_stopping_callback=...)
+    # NOT like this
+    trainer = Trainer(gpus=hparams.gpus, ...)
 
-    # NO
-    # model = LitModel(learning_rate=hparams.learning_rate, ...)
-    #trainer = Trainer(gpus=hparams.gpus, ...)
+    # init the model with Namespace directly
+    model = LitModel(args)
 
+    # or init the model with all the key-value pairs
+    dict_args = vars(args)
+    model = LitModel(**dict_args)
 
-LightiningModule hparams
-^^^^^^^^^^^^^^^^^^^^^^^^
+----------
 
-Normally, we don't hard-code the values to a model. We usually use the command line to
-modify the network and read those values in the LightningModule
+LightningModule hyperparameters
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Often times we train many versions of a model. You might share that model or come back to it a few months later
+at which point it is very useful to know how that model was trained (ie: what learning_rate, neural network, etc...).
+
+Lightning has a few ways of saving that information for you in checkpoints and yaml files. The goal here is to
+improve readability and reproducibility
+
+1. The first way is to ask lightning to save the values anything in the __init__ for you to the checkpoint. This also
+makes those values available via `self.hparams`.
 
 .. code-block:: python
 
-    class LitMNIST(pl.LightningModule):
-      def __init__(self, hparams):
-        super().__init__()
+    class LitMNIST(LightningModule):
 
-        # do this to save all arguments in any logger (tensorboard)
-        self.hparams = hparams
+        def __init__(self, layer_1_dim=128, learning_rate=1e-2, **kwargs):
+            super().__init__()
+            # call this to save (layer_1_dim=128, learning_rate=1e-4) to the checkpoint
+            self.save_hyperparameters()
 
-        self.layer_1 = torch.nn.Linear(28 * 28, hparams.layer_1_dim)
-        self.layer_2 = torch.nn.Linear(hparams.layer_1_dim, hparams.layer_2_dim)
-        self.layer_3 = torch.nn.Linear(hparams.layer_2_dim, 10)
+            # equivalent
+            self.save_hyperparameters(['layer_1_dim', 'learning_rate'])
 
-      def forward(self, x):
-        ...
+            # this now works
+            self.hparams.layer_1_dim
 
-      def train_dataloader(self):
-        ...
-        return DataLoader(mnist_train, batch_size=self.hparams.batch_size)
 
-      def configure_optimizers(self):
-        return Adam(self.parameters(), lr=self.hparams.learning_rate)
-
-      @staticmethod
-      def add_model_specific_args(parent_parser):
-        parser = ArgumentParser(parents=[parent_parser], add_help=False)
-
-        parser.add_argument('--layer_1_dim', type=int, default=128)
-        parser.add_argument('--layer_2_dim', type=int, default=256)
-        parser.add_argument('--batch_size', type=int, default=64)
-        parser.add_argument('--learning_rate', type=float, default=0.002)
-        return parser
-
-Now pass in the params when you init your model
+2. Sometimes your init might have objects or other parameters you might not want to save.
+In that case, choose only a few
 
 .. code-block:: python
 
-    hparams = parse_args()
-    model = LitMNIST(hparams)
+    class LitMNIST(LightningModule):
 
-The line `self.hparams = hparams` is very special. This line assigns your hparams to the LightningModule.
-This does two things:
+        def __init__(self, loss_fx, generator_network, layer_1_dim=128 **kwargs):
+            super().__init__()
+            self.layer_1_dim = layer_1_dim
+            self.loss_fx = loss_fx
 
-1.  It adds them automatically to tensorboard logs under the hparams tab.
-2.  Lightning will save those hparams to the checkpoint and use them to restore the module correctly.
+            # call this to save (layer_1_dim=128) to the checkpoint
+            self.save_hyperparameters(['layer_1_dim'])
+
+    # to load specify the other args
+    model = LitMNIST.load_from_checkpoint(PATH, loss_fx=torch.nn.SomeOtherLoss, generator_network=MyGenerator())
+
+
+3. Assign to `self.hparams`. Anything assigned to `self.hparams` will also be saved automatically
+
+.. code-block:: python
+
+    # using a argparse.Namespace
+    class LitMNIST(LightningModule):
+
+        def __init__(self, hparams, *args, **kwargs):
+            super().__init__()
+            self.hparams = hparams
+
+            self.layer_1 = torch.nn.Linear(28 * 28, self.hparams.layer_1_dim)
+            self.layer_2 = torch.nn.Linear(self.hparams.layer_1_dim, self.hparams.layer_2_dim)
+            self.layer_3 = torch.nn.Linear(self.hparams.layer_2_dim, 10)
+
+        def train_dataloader(self):
+            return DataLoader(mnist_train, batch_size=self.hparams.batch_size)
+
+4. You can also save full objects such as `dict` or `Namespace` to the checkpoint.
+
+.. code-block:: python
+
+    # using a argparse.Namespace
+    class LitMNIST(LightningModule):
+
+        def __init__(self, conf, *args, **kwargs):
+            super().__init__()
+            self.hparams = conf
+
+            # equivalent
+            self.save_hyperparameters(conf)
+
+            self.layer_1 = torch.nn.Linear(28 * 28, self.hparams.layer_1_dim)
+            self.layer_2 = torch.nn.Linear(self.hparams.layer_1_dim, self.hparams.layer_2_dim)
+            self.layer_3 = torch.nn.Linear(self.hparams.layer_2_dim, 10)
+
+    conf = OmegaConf.create(...)
+    model = LitMNIST(conf)
+
+    # this works
+    model.hparams.anything
+
+----------
 
 Trainer args
 ^^^^^^^^^^^^
@@ -158,6 +210,7 @@ To recap, add ALL possible trainer flags to the argparser and init the Trainer t
     # or if you need to pass in callbacks
     trainer = Trainer.from_argparse_args(hparams, checkpoint_callback=..., callbacks=[...])
 
+----------
 
 Multiple Lightning Modules
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -165,43 +218,48 @@ Multiple Lightning Modules
 We often have multiple Lightning Modules where each one has different arguments. Instead of
 polluting the main.py file, the LightningModule lets you define arguments for each one.
 
-.. code-block:: python
+.. testcode::
 
-    class LitMNIST(pl.LightningModule):
-        def __init__(self, hparams):
+    class LitMNIST(LightningModule):
+
+        def __init__(self, layer_1_dim, **kwargs):
             super().__init__()
-            self.layer_1 = torch.nn.Linear(28 * 28, hparams.layer_1_dim)
+            self.layer_1 = torch.nn.Linear(28 * 28, layer_1_dim)
 
         @staticmethod
         def add_model_specific_args(parent_parser):
-            parser = ArgumentParser(parents=[parent_parser])
+            parser = ArgumentParser(parents=[parent_parser], add_help=False)
             parser.add_argument('--layer_1_dim', type=int, default=128)
             return parser
 
-    class GoodGAN(pl.LightningModule):
-        def __init__(self, hparams):
+.. testcode::
+
+    class GoodGAN(LightningModule):
+
+        def __init__(self, encoder_layers, **kwargs):
             super().__init__()
-            self.encoder = Encoder(layers=hparams.encoder_layers)
+            self.encoder = Encoder(layers=encoder_layers)
 
         @staticmethod
         def add_model_specific_args(parent_parser):
-            parser = ArgumentParser(parents=[parent_parser])
+            parser = ArgumentParser(parents=[parent_parser], add_help=False)
             parser.add_argument('--encoder_layers', type=int, default=12)
             return parser
 
-Now we can allow each model to inject the arguments it needs in the main.py
+
+Now we can allow each model to inject the arguments it needs in the ``main.py``
 
 .. code-block:: python
 
     def main(args):
+        dict_args = vars(args)
 
         # pick model
         if args.model_name == 'gan':
-            model = GoodGAN(hparams=args)
+            model = GoodGAN(**dict_args)
         elif args.model_name == 'mnist':
-            model = LitMNIST(hparams=args)
+            model = LitMNIST(**dict_args)
 
-        model = LitMNIST(hparams=args)
         trainer = Trainer.from_argparse_args(args)
         trainer.fit(model)
 
@@ -213,7 +271,7 @@ Now we can allow each model to inject the arguments it needs in the main.py
         parser.add_argument('--model_name', type=str, default='gan', help='gan or mnist')
 
         # THIS LINE IS KEY TO PULL THE MODEL NAME
-        temp_args = parser.parse_known_args()
+        temp_args, _ = parser.parse_known_args()
 
         # let the model add what it wants
         if temp_args.model_name == 'gan':
@@ -226,12 +284,14 @@ Now we can allow each model to inject the arguments it needs in the main.py
         # train
         main(args)
 
-and now we can train MNIST or the gan using the command line interface!
+and now we can train MNIST or the GAN using the command line interface!
 
 .. code-block:: bash
 
     $ python main.py --model_name gan --encoder_layers 24
     $ python main.py --model_name mnist --layer_1_dim 128
+
+----------
 
 Hyperparameter Optimization
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^

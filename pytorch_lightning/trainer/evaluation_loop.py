@@ -22,32 +22,32 @@ If you have a small dataset you might want to check validation every n epochs
 Set how much of the validation set to check
 -------------------------------------------
 
-If you don't want to check 100% of the validation set (for debugging or if it's huge), set this flag
+If you don't want to check 100% of the validation set (for debugging or if it's huge), set this flag.
 
-val_percent_check will be overwritten by overfit_pct if `overfit_pct > 0`
+limit_val_batches will be overwritten by overfit_batches if `overfit_batches > 0`
 
 .. code-block:: python
 
     # DEFAULT
-    trainer = Trainer(val_percent_check=1.0)
+    trainer = Trainer(limit_val_batches=1.0)
 
     # check 10% only
-    trainer = Trainer(val_percent_check=0.1)
+    trainer = Trainer(limit_val_batches=0.1)
 
 Set how much of the test set to check
 -------------------------------------
 
-If you don't want to check 100% of the test set (for debugging or if it's huge), set this flag
+If you don't want to check 100% of the test set (for debugging or if it's huge), set this flag.
 
-test_percent_check will be overwritten by overfit_pct if `overfit_pct > 0`
+limit_test_batches will be overwritten by overfit_batches if `overfit_batches > 0`
 
 .. code-block:: python
 
     # DEFAULT
-    trainer = Trainer(test_percent_check=1.0)
+    trainer = Trainer(limit_test_batches=1.0)
 
     # check 10% only
-    trainer = Trainer(test_percent_check=0.1)
+    trainer = Trainer(limit_test_batches=0.1)
 
 Set validation check frequency within 1 training epoch
 ------------------------------------------------------
@@ -105,10 +105,9 @@ Second case is where you load a model and run the test set
 
 .. code-block:: python
 
-    model = MyLightningModule.load_from_metrics(
-        weights_path='/path/to/pytorch_checkpoint.ckpt',
-        tags_csv='/path/to/test_tube/experiment/version/meta_tags.csv',
-        on_gpu=True,
+    model = MyLightningModule.load_from_checkpoint(
+        checkpoint_path='/path/to/pytorch_checkpoint.ckpt',
+        hparams_file='/path/to/test_tube/experiment/version/hparams.yaml',
         map_location=None
     )
 
@@ -125,7 +124,7 @@ In this second case, the options you pass to trainer will be used when running
 
 from abc import ABC, abstractmethod
 from pprint import pprint
-from typing import Callable
+from typing import Callable, Optional, List, Union
 
 import torch
 from torch.utils.data import DataLoader
@@ -163,18 +162,19 @@ class TrainerEvaluationLoopMixin(ABC):
     single_gpu: bool
     data_parallel_device_ids: ...
     model: LightningModule
-    num_test_batches: int
+    num_test_batches: List[int]
     num_val_batches: int
     fast_dev_run: ...
     process_output: ...
     progress_bar_dict: ...
-    proc_rank: int
+    global_rank: int
     current_epoch: int
     callback_metrics: ...
     test_dataloaders: DataLoader
     val_dataloaders: DataLoader
     use_tpu: bool
     reload_dataloaders_every_epoch: ...
+    tpu_id: int
 
     # Callback system
     on_validation_batch_start: Callable
@@ -191,11 +191,11 @@ class TrainerEvaluationLoopMixin(ABC):
         """Warning: this is just empty shell for code implemented in other class."""
 
     @abstractmethod
-    def get_model(self):
+    def get_model(self) -> LightningModule:
         """Warning: this is just empty shell for code implemented in other class."""
 
     @abstractmethod
-    def is_overriden(self, *args):
+    def is_overridden(self, *args):
         """Warning: this is just empty shell for code implemented in other class."""
 
     @abstractmethod
@@ -222,13 +222,20 @@ class TrainerEvaluationLoopMixin(ABC):
     def reset_val_dataloader(self, *args):
         """Warning: this is just empty shell for code implemented in other class."""
 
-    def _evaluate(self, model: LightningModule, dataloaders, max_batches: int, test_mode: bool = False):
+    def _evaluate(
+        self,
+        model: LightningModule,
+        dataloaders: List[DataLoader],
+        max_batches: Union[int, List[int]],
+        test_mode: bool = False
+    ):
         """Run evaluation code.
 
         Args:
-            model: PT model
-            dataloaders: list of PT dataloaders
-            max_batches: Scalar
+            model: The model to evaluate.
+            dataloaders: A list of PyTorch dataloaders.
+            max_batches: An integer or list of integers with length of the number of dataloaders. Each
+                entry is the number of batches to process in the corresponding dataloader.
             test_mode:
         """
         # enable eval mode
@@ -244,22 +251,29 @@ class TrainerEvaluationLoopMixin(ABC):
         # bookkeeping
         outputs = []
 
+        # convert max_batches to list
+        if isinstance(max_batches, int):
+            max_batches = [max_batches] * len(dataloaders)
+
         # run validation
         for dataloader_idx, dataloader in enumerate(dataloaders):
             dl_outputs = []
 
             # on TPU we have to wrap it under the ParallelLoader
             if self.use_tpu:
-                device = xm.xla_device()
+                device = xm.xla_device(self.tpu_id)
                 dataloader = xla_pl.ParallelLoader(dataloader, [device])
                 dataloader = dataloader.per_device_loader(device)
+
+            # each dataloader has a max num batches
+            dl_max_batches = max_batches[dataloader_idx]
 
             for batch_idx, batch in enumerate(dataloader):
                 if batch is None:
                     continue
 
                 # stop short when on fast_dev_run (sets max_batch=1)
-                if batch_idx >= max_batches:
+                if batch_idx >= dl_max_batches:
                     break
 
                 # callbacks
@@ -279,13 +293,13 @@ class TrainerEvaluationLoopMixin(ABC):
 
                 # on dp / ddp2 might still want to do something with the batch parts
                 if test_mode:
-                    if self.is_overriden('test_step_end'):
+                    if self.is_overridden('test_step_end'):
                         model_ref = self.get_model()
                         with self.profiler.profile('test_step_end'):
                             output = model_ref.test_step_end(output)
                     self.on_test_batch_end()
                 else:
-                    if self.is_overriden('validation_step_end'):
+                    if self.is_overridden('validation_step_end'):
                         model_ref = self.get_model()
                         with self.profiler.profile('validation_step_end'):
                             output = model_ref.validation_step_end(output)
@@ -307,23 +321,23 @@ class TrainerEvaluationLoopMixin(ABC):
             model = model.module
 
         if test_mode:
-            if self.is_overriden('test_end', model=model):
+            if self.is_overridden('test_end', model=model):
                 # TODO: remove in v1.0.0
                 eval_results = model.test_end(outputs)
                 rank_zero_warn('Method `test_end` was deprecated in v0.7 and will be removed v1.0.'
                                ' Use `test_epoch_end` instead.', DeprecationWarning)
 
-            elif self.is_overriden('test_epoch_end', model=model):
+            elif self.is_overridden('test_epoch_end', model=model):
                 eval_results = model.test_epoch_end(outputs)
 
         else:
-            if self.is_overriden('validation_end', model=model):
+            if self.is_overridden('validation_end', model=model):
                 # TODO: remove in v1.0.0
                 eval_results = model.validation_end(outputs)
                 rank_zero_warn('Method `validation_end` was deprecated in v0.7 and will be removed v1.0.'
                                ' Use `validation_epoch_end` instead.', DeprecationWarning)
 
-            elif self.is_overriden('validation_epoch_end', model=model):
+            elif self.is_overridden('validation_epoch_end', model=model):
                 eval_results = model.validation_epoch_end(outputs)
 
         # enable train mode again
@@ -335,20 +349,13 @@ class TrainerEvaluationLoopMixin(ABC):
         return eval_results
 
     def run_evaluation(self, test_mode: bool = False):
-        # when testing make sure user defined a test step
-        if test_mode and not self.is_overriden('test_step'):
-            raise MisconfigurationException(
-                "You called `.test()` without defining model's `.test_step()`."
-                " Please define and try again")
-
         # hook
         model = self.get_model()
         model.on_pre_performance_check()
 
         # select dataloaders
         if test_mode:
-            if self.test_dataloaders is None:
-                self.reset_test_dataloader(model)
+            self.reset_test_dataloader(model)
 
             dataloaders = self.test_dataloaders
             max_batches = self.num_test_batches
@@ -360,15 +367,24 @@ class TrainerEvaluationLoopMixin(ABC):
             dataloaders = self.val_dataloaders
             max_batches = self.num_val_batches
 
+        # enable fast_dev_run without val loop
+        if dataloaders is None:
+            return
+
         # cap max batches to 1 when using fast_dev_run
         if self.fast_dev_run:
-            max_batches = 1
+            max_batches = [1]
 
         # Validation/Test begin callbacks
         if test_mode:
             self.on_test_start()
         else:
             self.on_validation_start()
+
+        # enable disabling validation step with limit_val_batches = 0
+        should_skip = sum(max_batches) == 0
+        if should_skip:
+            return
 
         # run evaluation
         eval_results = self._evaluate(self.model, dataloaders, max_batches, test_mode)
@@ -378,7 +394,7 @@ class TrainerEvaluationLoopMixin(ABC):
         self.add_progress_bar_metrics(prog_bar_metrics)
 
         # log results of test
-        if test_mode and self.proc_rank == 0:
+        if test_mode and self.is_global_zero:
             print('-' * 80)
             print('TEST RESULTS')
             pprint(callback_metrics)
@@ -437,7 +453,7 @@ class TrainerEvaluationLoopMixin(ABC):
 
         # TPU data  transfer
         if self.use_tpu:
-            batch = self.transfer_batch_to_tpu(batch)
+            batch = self.transfer_batch_to_tpu(batch, self.tpu_id)
             args[0] = batch
 
         # CPU, TPU or gpu step

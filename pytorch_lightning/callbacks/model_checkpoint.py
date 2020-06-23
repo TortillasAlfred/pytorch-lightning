@@ -20,7 +20,10 @@ from pytorch_lightning.utilities import rank_zero_warn, rank_zero_only
 
 class ModelCheckpoint(Callback):
     r"""
-    Save the model after every epoch.
+    Save the model after every epoch if it improves.
+
+    After training finishes, use :attr:`best_model_path` to retrieve the path to the
+    best checkpoint file and :attr:`best_model_score` to retrieve its score.
 
     Args:
         filepath: path to save the model file.
@@ -43,6 +46,7 @@ class ModelCheckpoint(Callback):
 
         monitor: quantity to monitor.
         verbose: verbosity mode. Default: ``False``.
+        save_last: always saves the model at the end of the epoch. Default: ``False``.
         save_top_k: if `save_top_k == k`,
             the best k models according to
             the quantity monitored will be saved.
@@ -80,10 +84,17 @@ class ModelCheckpoint(Callback):
         ...     filepath='my/path/sample-mnist_{epoch:02d}-{val_loss:.2f}'
         ... )
 
+        # retrieve the best checkpoint after training
+        checkpoint_callback = ModelCheckpoint(filepath='my/path/')
+        trainer = Trainer(checkpoint_callback=checkpoint_callback)
+        model = ...
+        trainer.fit(model)
+        checkpoint_callback.best_model_path
+
     """
 
     def __init__(self, filepath: Optional[str] = None, monitor: str = 'val_loss', verbose: bool = False,
-                 save_top_k: int = 1, save_weights_only: bool = False,
+                 save_last: bool = False, save_top_k: int = 1, save_weights_only: bool = False,
                  mode: str = 'auto', period: int = 1, prefix: str = ''):
         super().__init__()
         if save_top_k > 0 and filepath is not None and os.path.isdir(filepath) and len(os.listdir(filepath)) > 0:
@@ -101,8 +112,10 @@ class ModelCheckpoint(Callback):
             if os.path.isdir(filepath):
                 self.dirpath, self.filename = filepath, '{epoch}'
             else:
+                filepath = os.path.realpath(filepath)
                 self.dirpath, self.filename = os.path.split(filepath)
             os.makedirs(self.dirpath, exist_ok=True)
+        self.save_last = save_last
         self.save_top_k = save_top_k
         self.save_weights_only = save_weights_only
         self.period = period
@@ -110,8 +123,9 @@ class ModelCheckpoint(Callback):
         self.prefix = prefix
         self.best_k_models = {}
         # {filename: monitor}
-        self.kth_best_model = ''
-        self.best = 0
+        self.kth_best_model_path = ''
+        self.best_model_score = 0
+        self.best_model_path = ''
         self.save_function = None
 
         torch_inf = torch.tensor(np.Inf)
@@ -129,6 +143,18 @@ class ModelCheckpoint(Callback):
 
         self.kth_value, self.mode = mode_dict[mode]
 
+    @property
+    def best(self):
+        rank_zero_warn("Attribute `best` has been renamed to `best_model_score` since v0.8.0"
+                       " and will be removed in v0.10.0", DeprecationWarning)
+        return self.best_model_score
+
+    @property
+    def kth_best_model(self):
+        rank_zero_warn("Attribute `kth_best_model` has been renamed to `kth_best_model_path` since v0.8.0"
+                       " and will be removed in v0.10.0", DeprecationWarning)
+        return self.kth_best_model_path
+
     def _del_model(self, filepath):
         if os.path.isfile(filepath):
             os.remove(filepath)
@@ -139,7 +165,7 @@ class ModelCheckpoint(Callback):
 
         # delegate the saving to the model
         if self.save_function is not None:
-            self.save_function(filepath)
+            self.save_function(filepath, self.save_weights_only)
         else:
             raise ValueError(".save_function() not set")
 
@@ -149,6 +175,10 @@ class ModelCheckpoint(Callback):
             return True
 
         if not isinstance(current, torch.Tensor):
+            rank_zero_warn(
+                f'{current} is supposed to be a `torch.Tensor`. Saving checkpoint may not work correctly.'
+                f' HINT: check the value of {self.monitor} in your validation loop', RuntimeWarning
+            )
             current = torch.tensor(current)
 
         monitor_op = {
@@ -156,7 +186,7 @@ class ModelCheckpoint(Callback):
             "max": torch.gt,
         }[self.mode]
 
-        return monitor_op(current, self.best_k_models[self.kth_best_model])
+        return monitor_op(current, self.best_k_models[self.kth_best_model_path])
 
     def format_checkpoint_name(self, epoch, metrics, ver=None):
         """Generate a filename according to the defined template.
@@ -199,7 +229,7 @@ class ModelCheckpoint(Callback):
     @rank_zero_only
     def on_validation_end(self, trainer, pl_module):
         # only run on main process
-        if trainer.proc_rank != 0:
+        if trainer.global_rank != 0:
             return
 
         metrics = trainer.callback_metrics
@@ -213,6 +243,10 @@ class ModelCheckpoint(Callback):
 
         self.epoch_last_check = epoch
 
+        if self.save_last:
+            filepath = os.path.join(self.dirpath, self.prefix + 'last.ckpt')
+            self._save_model(filepath)
+
         filepath = self.format_checkpoint_name(epoch, metrics)
         version_cnt = 0
         while os.path.isfile(filepath):
@@ -222,6 +256,14 @@ class ModelCheckpoint(Callback):
 
         if self.save_top_k != -1:
             current = metrics.get(self.monitor)
+
+            if not isinstance(current, torch.Tensor):
+                rank_zero_warn(
+                    f'The metric you returned {current} must be a `torch.Tensor` instance, checkpoint not saved'
+                    f' HINT: what is the value of {self.monitor} in validation_epoch_end()?', RuntimeWarning
+                )
+                if current is not None:
+                    current = torch.tensor(current)
 
             if current is None:
                 rank_zero_warn(
@@ -242,25 +284,26 @@ class ModelCheckpoint(Callback):
 
         del_list = []
         if len(self.best_k_models) == self.save_top_k and self.save_top_k > 0:
-            delpath = self.kth_best_model
-            self.best_k_models.pop(self.kth_best_model)
+            delpath = self.kth_best_model_path
+            self.best_k_models.pop(self.kth_best_model_path)
             del_list.append(delpath)
 
         self.best_k_models[filepath] = current
         if len(self.best_k_models) == self.save_top_k:
             # monitor dict has reached k elements
             _op = max if self.mode == 'min' else min
-            self.kth_best_model = _op(self.best_k_models,
-                                      key=self.best_k_models.get)
-            self.kth_value = self.best_k_models[self.kth_best_model]
+            self.kth_best_model_path = _op(self.best_k_models,
+                                           key=self.best_k_models.get)
+            self.kth_value = self.best_k_models[self.kth_best_model_path]
 
         _op = min if self.mode == 'min' else max
-        self.best = _op(self.best_k_models.values())
+        self.best_model_path = _op(self.best_k_models, key=self.best_k_models.get)
+        self.best_model_score = self.best_k_models[self.best_model_path]
 
         if self.verbose > 0:
             log.info(
                 f'\nEpoch {epoch:05d}: {self.monitor} reached'
-                f' {current:0.5f} (best {self.best:0.5f}), saving model to'
+                f' {current:0.5f} (best {self.best_model_score:0.5f}), saving model to'
                 f' {filepath} as top {self.save_top_k}')
         self._save_model(filepath)
 

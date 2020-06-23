@@ -1,7 +1,7 @@
 r"""
 
-Logging of learning rates
-=========================
+Learning Rate Logger
+====================
 
 Log learning rate for lr schedulers during training
 
@@ -9,6 +9,8 @@ Log learning rate for lr schedulers during training
 
 from pytorch_lightning.callbacks.base import Callback
 from pytorch_lightning.utilities.exceptions import MisconfigurationException
+
+from pytorch_lightning.utilities import rank_zero_warn
 
 
 class LearningRateLogger(Callback):
@@ -45,21 +47,22 @@ class LearningRateLogger(Callback):
             schedulers in the case of multiple of the same type or in
             the case of multiple parameter groups
         """
-        if trainer.lr_schedulers == []:
-            raise MisconfigurationException(
-                'Cannot use LearningRateLogger callback with models that have no'
-                ' learning rate schedulers. Please see documentation for'
-                ' `configure_optimizers` method.')
-
         if not trainer.logger:
             raise MisconfigurationException(
                 'Cannot use LearningRateLogger callback with Trainer that has no logger.')
+
+        if not trainer.lr_schedulers:
+            rank_zero_warn(
+                'You are using LearningRateLogger callback with models that'
+                ' have no learning rate schedulers. Please see documentation'
+                ' for `configure_optimizers` method.', RuntimeWarning
+            )
 
         # Find names for schedulers
         names = self._find_names(trainer.lr_schedulers)
 
         # Initialize for storing values
-        self.lrs = dict.fromkeys(names, [])
+        self.lrs = {name: [] for name in names}
 
     def on_batch_start(self, trainer, pl_module):
         latest_stat = self._extract_lr(trainer, 'step')
@@ -80,7 +83,7 @@ class LearningRateLogger(Callback):
                 param_groups = scheduler['scheduler'].optimizer.param_groups
                 if len(param_groups) != 1:
                     for i, pg in enumerate(param_groups):
-                        lr, key = pg['lr'], f'{name}/{i + 1}'
+                        lr, key = pg['lr'], f'{name}/pg{i + 1}'
                         self.lrs[key].append(lr)
                         latest_stat[key] = lr
                 else:
@@ -109,7 +112,7 @@ class LearningRateLogger(Callback):
             param_groups = sch.optimizer.param_groups
             if len(param_groups) != 1:
                 for i, pg in enumerate(param_groups):
-                    temp = name + '/pg' + str(i + 1)
+                    temp = f'{name}/pg{i + 1}'
                     names.append(temp)
             else:
                 names.append(name)

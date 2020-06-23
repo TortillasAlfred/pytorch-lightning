@@ -1,17 +1,13 @@
 import pickle
 
-import tests.base.utils as tutils
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import TrainsLogger
-from tests.base import LightningTestModel
+from tests.base import EvalModelTemplate
 
 
 def test_trains_logger(tmpdir):
     """Verify that basic functionality of TRAINS logger works."""
-    tutils.reset_seed()
-
-    hparams = tutils.get_default_hparams()
-    model = LightningTestModel(hparams)
+    model = EvalModelTemplate()
     TrainsLogger.set_bypass_mode(True)
     TrainsLogger.set_credentials(api_host='http://integration.trains.allegro.ai:8008',
                                  files_host='http://integration.trains.allegro.ai:8081',
@@ -21,20 +17,18 @@ def test_trains_logger(tmpdir):
     trainer = Trainer(
         default_root_dir=tmpdir,
         max_epochs=1,
-        train_percent_check=0.05,
+        limit_train_batches=0.05,
         logger=logger
     )
     result = trainer.fit(model)
 
-    print('result finished')
+    # print('result finished')
     logger.finalize()
     assert result == 1, "Training failed"
 
 
 def test_trains_pickle(tmpdir):
     """Verify that pickling trainer with TRAINS logger works."""
-    tutils.reset_seed()
-
     # hparams = tutils.get_default_hparams()
     # model = LightningTestModel(hparams)
     TrainsLogger.set_bypass_mode(True)

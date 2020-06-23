@@ -1,32 +1,37 @@
 import os
-from argparse import Namespace
 
 import numpy as np
 import torch
 
 # from pl_examples import LightningTemplateModel
-from pytorch_lightning import Trainer
+from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from tests import TEMP_PATH, RANDOM_PORTS, RANDOM_SEEDS
-from tests.base import LightningTestModel
-from tests.base.datasets import PATH_DATASETS
+from tests.base.model_template import EvalModelTemplate
 
 
-def assert_speed_parity(pl_times, pt_times, num_epochs):
-
+def assert_speed_parity_relative(pl_times, pt_times, max_diff: float = 0.1):
     # assert speeds
-    max_diff_per_epoch = 0.65
-    pl_times = np.asarray(pl_times)
-    pt_times = np.asarray(pt_times)
-    diffs = pl_times - pt_times
-    diffs = diffs / num_epochs
-
-    assert np.alltrue(diffs < max_diff_per_epoch), \
-        f"lightning was slower than PT (threshold {max_diff_per_epoch})"
+    diffs = np.asarray(pl_times) - np.asarray(pt_times)
+    # norm by vanila time
+    diffs = diffs / np.asarray(pt_times)
+    assert np.alltrue(diffs < max_diff), \
+        f"lightning {diffs} was slower than PT (threshold {max_diff})"
 
 
-def run_model_test_without_loggers(trainer_options, model, min_acc=0.50):
+def assert_speed_parity_absolute(pl_times, pt_times, nb_epochs, max_diff: float = 0.6):
+    # assert speeds
+    diffs = np.asarray(pl_times) - np.asarray(pt_times)
+    # norm by vanila time
+    diffs = diffs / nb_epochs
+    assert np.alltrue(diffs < max_diff), \
+        f"lightning {diffs} was slower than PT (threshold {max_diff})"
+
+
+def run_model_test_without_loggers(trainer_options, model, min_acc: float = 0.50):
+    reset_seed()
+
     # fit model
     trainer = Trainer(**trainer_options)
     result = trainer.fit(model)
@@ -53,7 +58,8 @@ def run_model_test_without_loggers(trainer_options, model, min_acc=0.50):
         trainer.optimizers, trainer.lr_schedulers = pretrained_model.configure_optimizers()
 
 
-def run_model_test(trainer_options, model, on_gpu=True, version=None, with_hpc=True):
+def run_model_test(trainer_options, model, on_gpu: bool = True, version=None, with_hpc: bool = True):
+    reset_seed()
     save_dir = trainer_options['default_root_dir']
 
     # logger file to get meta
@@ -94,44 +100,6 @@ def run_model_test(trainer_options, model, on_gpu=True, version=None, with_hpc=T
         trainer.hpc_load(save_dir, on_gpu=on_gpu)
 
 
-def get_default_hparams(continue_training=False, hpc_exp_number=0):
-    _ = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-
-    args = {
-        'drop_prob': 0.2,
-        'batch_size': 32,
-        'in_features': 28 * 28,
-        'learning_rate': 0.001 * 8,
-        'optimizer_name': 'adam',
-        'data_root': PATH_DATASETS,
-        'out_features': 10,
-        'hidden_dim': 1000,
-        'b1': 0.5,
-        'b2': 0.999,
-    }
-
-    if continue_training:
-        args.update(
-            test_tube_do_checkpoint_load=True,
-            hpc_exp_number=hpc_exp_number,
-        )
-
-    hparams = Namespace(**args)
-    return hparams
-
-
-def get_default_model(lbfgs=False):
-    # set up model with these hyperparams
-    hparams = get_default_hparams()
-    if lbfgs:
-        setattr(hparams, 'optimizer_name', 'lbfgs')
-        setattr(hparams, 'learning_rate', 0.005)
-
-    model = LightningTestModel(hparams)
-
-    return model, hparams
-
-
 def get_default_logger(save_dir, version=None):
     # set up logger object without actually saving logs
     logger = TensorBoardLogger(save_dir, name='lightning_logs', version=version)
@@ -159,17 +127,17 @@ def get_data_path(expt_logger, path_dir=None):
     return path_expt
 
 
-def load_model(logger, root_weights_dir, module_class=LightningTestModel, path_expt=None):
+def load_model(logger, root_weights_dir, module_class=EvalModelTemplate, path_expt=None):
     # load trained model
     path_expt_dir = get_data_path(logger, path_dir=path_expt)
-    tags_path = os.path.join(path_expt_dir, TensorBoardLogger.NAME_CSV_TAGS)
+    hparams_path = os.path.join(path_expt_dir, TensorBoardLogger.NAME_HPARAMS_FILE)
 
     checkpoints = [x for x in os.listdir(root_weights_dir) if '.ckpt' in x]
     weights_dir = os.path.join(root_weights_dir, checkpoints[0])
 
     trained_model = module_class.load_from_checkpoint(
         checkpoint_path=weights_dir,
-        tags_csv=tags_path
+        hparams_file=hparams_path
     )
 
     assert trained_model is not None, 'loading model failed'
@@ -177,7 +145,7 @@ def load_model(logger, root_weights_dir, module_class=LightningTestModel, path_e
     return trained_model
 
 
-def load_model_from_checkpoint(root_weights_dir, module_class=LightningTestModel):
+def load_model_from_checkpoint(root_weights_dir, module_class=EvalModelTemplate):
     # load trained model
     checkpoints = [x for x in os.listdir(root_weights_dir) if '.ckpt' in x]
     weights_dir = os.path.join(root_weights_dir, checkpoints[0])
@@ -191,7 +159,7 @@ def load_model_from_checkpoint(root_weights_dir, module_class=LightningTestModel
     return trained_model
 
 
-def run_prediction(dataloader, trained_model, dp=False, min_acc=0.5):
+def run_prediction(dataloader, trained_model, dp=False, min_acc=0.50):
     # run prediction on 1 batch
     for batch in dataloader:
         break
@@ -224,11 +192,11 @@ def assert_ok_model_acc(trainer, key='test_acc', thr=0.5):
 
 def reset_seed():
     seed = RANDOM_SEEDS.pop()
-    torch.manual_seed(seed)
-    np.random.seed(seed)
+    seed_everything(seed)
 
 
 def set_random_master_port():
+    reset_seed()
     port = RANDOM_PORTS.pop()
     os.environ['MASTER_PORT'] = str(port)
 

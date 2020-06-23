@@ -2,7 +2,6 @@ import os
 import pickle
 from unittest.mock import patch
 
-import tests.base.utils as tutils
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import WandbLogger
 
@@ -11,8 +10,6 @@ from pytorch_lightning.loggers import WandbLogger
 def test_wandb_logger(wandb):
     """Verify that basic functionality of wandb logger works.
     Wandb doesn't work well with pytest so we have to mock it out here."""
-    tutils.reset_seed()
-
     logger = WandbLogger(anonymous=True, offline=True)
 
     logger.log_metrics({'acc': 1.0})
@@ -38,8 +35,6 @@ def test_wandb_pickle(wandb):
 
     Wandb doesn't work well with pytest so we have to mock it out here.
     """
-    tutils.reset_seed()
-
     class Experiment:
         id = 'the_id'
 

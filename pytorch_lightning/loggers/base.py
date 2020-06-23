@@ -3,12 +3,10 @@ import functools
 import operator
 from abc import ABC, abstractmethod
 from argparse import Namespace
-from typing import Union, Optional, Dict, Iterable, Any, Callable, List, Sequence, Mapping, Tuple
+from typing import Union, Optional, Dict, Iterable, Any, Callable, List, Sequence, Mapping, Tuple, MutableMapping
 
 import numpy as np
 import torch
-
-from pytorch_lightning.utilities import rank_zero_only
 
 
 class LightningLoggerBase(ABC):
@@ -125,7 +123,7 @@ class LightningLoggerBase(ABC):
         """
         agg_step, metrics_to_log = self._aggregate_metrics(metrics=metrics, step=step)
 
-        if metrics_to_log is not None:
+        if metrics_to_log:
             self.log_metrics(metrics=metrics_to_log, step=agg_step)
 
     @abstractmethod
@@ -174,9 +172,9 @@ class LightningLoggerBase(ABC):
 
         def _dict_generator(input_dict, prefixes=None):
             prefixes = prefixes[:] if prefixes else []
-            if isinstance(input_dict, dict):
+            if isinstance(input_dict, MutableMapping):
                 for key, value in input_dict.items():
-                    if isinstance(value, (dict, Namespace)):
+                    if isinstance(value, (MutableMapping, Namespace)):
                         value = vars(value) if isinstance(value, Namespace) else value
                         for d in _dict_generator(value, prefixes + [key]):
                             yield d
@@ -290,6 +288,41 @@ class LoggerCollection(LightningLoggerBase):
     @property
     def version(self) -> str:
         return '_'.join([str(logger.version) for logger in self._logger_iterable])
+
+
+class DummyExperiment(object):
+    """ Dummy experiment """
+    def nop(*args, **kw):
+        pass
+
+    def __getattr__(self, _):
+        return self.nop
+
+
+class DummyLogger(LightningLoggerBase):
+    """ Dummy logger for internal use. Is usefull if we want to disable users
+        logger for a feature, but still secure that users code can run """
+    def __init__(self):
+        super().__init__()
+        self._experiment = DummyExperiment()
+
+    @property
+    def experiment(self):
+        return self._experiment
+
+    def log_metrics(self, metrics, step):
+        pass
+
+    def log_hyperparams(self, params):
+        pass
+
+    @property
+    def name(self):
+        pass
+
+    @property
+    def version(self):
+        pass
 
 
 def merge_dicts(

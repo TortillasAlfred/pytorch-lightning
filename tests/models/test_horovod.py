@@ -8,10 +8,9 @@ import sys
 import pytest
 import torch
 
-from pytorch_lightning import Trainer
-
 import tests.base.utils as tutils
-from tests.base import LightningTestModel
+from pytorch_lightning import Trainer
+from tests.base import EvalModelTemplate
 from tests.base.models import TestGAN
 
 try:
@@ -40,8 +39,13 @@ def _nccl_available():
 
 def _run_horovod(trainer_options, on_gpu=False):
     """Execute the training script across multiple workers in parallel."""
-    cmdline = ['horovodrun', '-np', '2', sys.executable, TEST_SCRIPT,
-               '--trainer-options', shlex.quote(json.dumps(trainer_options))]
+    tutils.reset_seed()
+    cmdline = [
+        'horovodrun',
+        '-np', '2',
+        sys.executable, TEST_SCRIPT,
+        '--trainer-options', shlex.quote(json.dumps(trainer_options))
+    ]
     if on_gpu:
         cmdline += ['--on-gpu']
     exit_code = subprocess.call(' '.join(cmdline), shell=True, env=os.environ.copy())
@@ -57,9 +61,10 @@ def test_horovod_cpu(tmpdir):
         gradient_clip_val=1.0,
         progress_bar_refresh_rate=0,
         max_epochs=1,
-        train_percent_check=0.4,
-        val_percent_check=0.2,
-        distributed_backend='horovod'
+        limit_train_batches=0.4,
+        limit_val_batches=0.2,
+        distributed_backend='horovod',
+        deterministic=True,
     )
     _run_horovod(trainer_options)
 
@@ -73,8 +78,9 @@ def test_horovod_cpu_implicit(tmpdir):
         gradient_clip_val=1.0,
         progress_bar_refresh_rate=0,
         max_epochs=1,
-        train_percent_check=0.4,
-        val_percent_check=0.2,
+        limit_train_batches=0.4,
+        limit_val_batches=0.2,
+        deterministic=True,
     )
     _run_horovod(trainer_options)
 
@@ -90,9 +96,10 @@ def test_horovod_multi_gpu(tmpdir):
         gradient_clip_val=1.0,
         progress_bar_refresh_rate=0,
         max_epochs=1,
-        train_percent_check=0.4,
-        val_percent_check=0.2,
+        limit_train_batches=0.4,
+        limit_val_batches=0.2,
         gpus=1,
+        deterministic=True,
         distributed_backend='horovod'
     )
     _run_horovod(trainer_options, on_gpu=True)
@@ -103,7 +110,8 @@ def test_horovod_multi_gpu(tmpdir):
 @pytest.mark.skipif(not _nccl_available(), reason="test requires Horovod with NCCL support")
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="test requires GPU machine")
 def test_horovod_transfer_batch_to_gpu(tmpdir):
-    class TestTrainingStepModel(LightningTestModel):
+
+    class TestTrainingStepModel(EvalModelTemplate):
         def training_step(self, batch, *args, **kwargs):
             x, y = batch
             assert str(x.device) != 'cpu'
@@ -116,16 +124,17 @@ def test_horovod_transfer_batch_to_gpu(tmpdir):
             assert str(y.device) != 'cpu'
             return super(TestTrainingStepModel, self).validation_step(batch, *args, **kwargs)
 
-    hparams = tutils.get_default_hparams()
+    hparams = EvalModelTemplate.get_default_hparams()
     model = TestTrainingStepModel(hparams)
 
     trainer_options = dict(
         default_root_dir=str(tmpdir),
         progress_bar_refresh_rate=0,
         max_epochs=1,
-        train_percent_check=0.4,
-        val_percent_check=0.2,
+        limit_train_batches=0.4,
+        limit_val_batches=0.2,
         gpus=1,
+        deterministic=True,
         distributed_backend='horovod'
     )
     tutils.run_model_test_without_loggers(trainer_options, model)
@@ -134,15 +143,15 @@ def test_horovod_transfer_batch_to_gpu(tmpdir):
 @pytest.mark.skipif(sys.version_info >= (3, 8), reason="Horovod not yet supported in Python 3.8")
 @pytest.mark.skipif(platform.system() == "Windows", reason="Horovod is not supported on Windows")
 def test_horovod_multi_optimizer(tmpdir):
-    hparams = tutils.get_default_hparams()
-    model = TestGAN(hparams)
+    model = TestGAN(**EvalModelTemplate.get_default_hparams())
 
     trainer_options = dict(
         default_root_dir=str(tmpdir),
         progress_bar_refresh_rate=0,
         max_epochs=1,
-        train_percent_check=0.4,
-        val_percent_check=0.2,
+        limit_train_batches=0.4,
+        limit_val_batches=0.2,
+        deterministic=True,
         distributed_backend='horovod'
     )
 

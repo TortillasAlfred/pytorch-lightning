@@ -7,6 +7,7 @@ import tests.base.utils as tutils
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import (
     TensorBoardLogger, MLFlowLogger, NeptuneLogger, TestTubeLogger, CometLogger)
+from tests.base import EvalModelTemplate
 
 
 def _get_logger_args(logger_class, save_dir):
@@ -29,14 +30,12 @@ def _get_logger_args(logger_class, save_dir):
 ])
 def test_loggers_fit_test(tmpdir, monkeypatch, logger_class):
     """Verify that basic functionality of all loggers."""
-    tutils.reset_seed()
-
     # prevent comet logger from trying to print at exit, since
     # pytest's stdout/stderr redirection breaks it
     import atexit
     monkeypatch.setattr(atexit, 'register', lambda _: None)
 
-    model, _ = tutils.get_default_model()
+    model = EvalModelTemplate()
 
     class StoreHistoryLogger(logger_class):
         def __init__(self, *args, **kwargs):
@@ -53,8 +52,8 @@ def test_loggers_fit_test(tmpdir, monkeypatch, logger_class):
     trainer = Trainer(
         max_epochs=1,
         logger=logger,
-        train_percent_check=0.2,
-        val_percent_check=0.5,
+        limit_train_batches=0.2,
+        limit_val_batches=0.5,
         fast_dev_run=True,
     )
     trainer.fit(model)
@@ -78,8 +77,6 @@ def test_loggers_fit_test(tmpdir, monkeypatch, logger_class):
 ])
 def test_loggers_pickle(tmpdir, monkeypatch, logger_class):
     """Verify that pickling trainer with logger works."""
-    tutils.reset_seed()
-
     # prevent comet logger from trying to print at exit, since
     # pytest's stdout/stderr redirection breaks it
     import atexit
@@ -99,3 +96,28 @@ def test_loggers_pickle(tmpdir, monkeypatch, logger_class):
 
     trainer2 = pickle.loads(pkl_bytes)
     trainer2.logger.log_metrics({'acc': 1.0})
+
+
+@pytest.mark.parametrize("extra_params", [
+    pytest.param(dict(max_epochs=1, auto_scale_batch_size=True), id='Batch-size-Finder'),
+    pytest.param(dict(max_epochs=3, auto_lr_find=True), id='LR-Finder'),
+])
+def test_logger_reset_correctly(tmpdir, extra_params):
+    """ Test that the tuners do not alter the logger reference """
+    tutils.reset_seed()
+
+    model = EvalModelTemplate()
+
+    trainer = Trainer(
+        default_root_dir=tmpdir,
+        **extra_params
+    )
+    logger1 = trainer.logger
+    trainer.fit(model)
+    logger2 = trainer.logger
+    logger3 = model.logger
+
+    assert logger1 == logger2, \
+        'Finder altered the logger of trainer'
+    assert logger2 == logger3, \
+        'Finder altered the logger of model'

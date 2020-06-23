@@ -6,11 +6,20 @@ from pytorch_lightning.callbacks import Callback
 
 class TrainerCallbackHookMixin(ABC):
 
-    def __init__(self):
-        # this is just a summary on variables used in this abstract class,
-        # the proper values/initialisation should be done in child class
-        self.callbacks: List[Callback] = []
-        self.get_model: Callable = ...
+    # this is just a summary on variables used in this abstract class,
+    # the proper values/initialisation should be done in child class
+    callbacks: List[Callback] = []
+    get_model: Callable = ...
+
+    def setup(self, stage: str):
+        """Called in the beginning of fit and test"""
+        for callback in self.callbacks:
+            callback.setup(self, stage)
+
+    def teardown(self, stage: str):
+        """Called at the end of fit and test"""
+        for callback in self.callbacks:
+            callback.teardown(self, stage)
 
     def on_init_start(self):
         """Called when the trainer initialization begins, model has not yet been set."""
@@ -21,6 +30,16 @@ class TrainerCallbackHookMixin(ABC):
         """Called when the trainer initialization ends, model has not yet been set."""
         for callback in self.callbacks:
             callback.on_init_end(self)
+
+    def on_fit_start(self):
+        """Called when the trainer initialization begins, model has not yet been set."""
+        for callback in self.callbacks:
+            callback.on_fit_start(self)
+
+    def on_fit_end(self):
+        """Called when the trainer initialization begins, model has not yet been set."""
+        for callback in self.callbacks:
+            callback.on_fit_end(self)
 
     def on_sanity_check_start(self):
         """Called when the validation sanity check starts."""
@@ -101,3 +120,8 @@ class TrainerCallbackHookMixin(ABC):
         """Called when the test ends."""
         for callback in self.callbacks:
             callback.on_test_end(self, self.get_model())
+
+    def on_keyboard_interrupt(self):
+        """Called when the training is interrupted by KeyboardInterrupt."""
+        for callback in self.callbacks:
+            callback.on_keyboard_interrupt(self, self.get_model())

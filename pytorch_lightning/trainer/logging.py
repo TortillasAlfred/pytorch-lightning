@@ -18,7 +18,7 @@ class TrainerLoggingMixin(ABC):
     logger: Union[LightningLoggerBase, bool]
     progress_bar_metrics: ...
     global_step: int
-    proc_rank: int
+    global_rank: int
     use_dp: bool
     use_ddp2: bool
     default_root_dir: str
@@ -69,7 +69,7 @@ class TrainerLoggingMixin(ABC):
             scalar_metrics['epoch'] = self.current_epoch
             step = step if step is not None else self.global_step
         # log actual metrics
-        if self.proc_rank == 0 and self.logger is not None:
+        if self.is_global_zero and self.logger is not None:
             self.logger.agg_and_log_metrics(scalar_metrics, step=step)
             self.logger.save()
 
@@ -196,8 +196,8 @@ class TrainerLoggingMixin(ABC):
             elif isinstance(output[k], torch.Tensor) and output[k].dim() == 0:
                 pass
 
-            # reduce only metrics that have the same number of gpus
-            elif output[k].size(0) == num_gpus:
-                reduced = torch.mean(output[k])
-                output[k] = reduced
+            # do not reduce metrics that have batch size > num gpus
+            elif output[k].size(0) <= num_gpus:
+                output[k] = torch.mean(output[k])
+
         return output

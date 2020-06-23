@@ -1,3 +1,10 @@
+.. testsetup:: *
+
+    from pytorch_lightning.core.lightning import LightningModule
+    from pytorch_lightning.trainer.trainer import Trainer
+
+
+
 Quick Start
 ===========
 
@@ -13,7 +20,8 @@ To illustrate, here's the typical PyTorch project structure organized in a Light
 Step 1: Define a LightningModule
 ---------------------------------
 
-.. code-block:: python
+.. testcode::
+    :skipif: not TORCHVISION_AVAILABLE
 
     import os
 
@@ -22,10 +30,9 @@ Step 1: Define a LightningModule
     from torch.utils.data import DataLoader
     from torchvision.datasets import MNIST
     from torchvision import transforms
+    from pytorch_lightning.core.lightning import LightningModule
 
-    import pytorch_lightning as pl
-
-    class LitModel(pl.LightningModule):
+    class LitModel(LightningModule):
 
         def __init__(self):
             super().__init__()
@@ -53,7 +60,8 @@ Step 1: Define a LightningModule
 Step 2: Fit with a Trainer
 --------------------------
 
-.. code-block:: python
+.. testcode::
+    :skipif: torch.cuda.device_count() < 8
 
     from pytorch_lightning import Trainer
 
@@ -68,13 +76,15 @@ Under the hood, lightning does (in high-level pseudocode):
 .. code-block:: python
 
     model = LitModel()
-    train_dataloader = model.train_dataloader
+    torch.set_grad_enabled(True)
+    model.train()
+    train_dataloader = model.train_dataloader()
     optimizer = model.configure_optimizers()
 
     for epoch in epochs:
         train_outs = []
         for batch in train_dataloader:
-            loss = model.training_step()
+            loss = model.training_step(batch)
             loss.backward()
             train_outs.append(loss.detach())
 
@@ -88,9 +98,9 @@ Validation loop
 ---------------
 To also add a validation loop add the following functions
 
-.. code-block:: python
+.. testcode::
 
-    class LitModel(pl.LightningModule):
+    class LitModel(LightningModule):
 
         def validation_step(self, batch, batch_idx):
             x, y = batch
@@ -118,7 +128,11 @@ And now the trainer will call the validation loop automatically
 
 Under the hood in pseudocode, lightning does the following:
 
-.. code-block:: python
+.. testsetup:: *
+
+    train_dataloader = []
+
+.. testcode::
 
     # ...
     for batch in train_dataloader:
@@ -127,6 +141,7 @@ Under the hood in pseudocode, lightning does the following:
         # ...
 
         if validate_at_some_point:
+            torch.set_grad_enabled(False)
             model.eval()
             val_outs = []
             for val_batch in model.val_dataloader:
@@ -134,6 +149,7 @@ Under the hood in pseudocode, lightning does the following:
                 val_outs.append(val_out)
 
             model.validation_epoch_end(val_outs)
+            torch.set_grad_enabled(True)
             model.train()
 
 The beauty of Lightning is that it handles the details of when to validate, when to call .eval(),
@@ -145,9 +161,9 @@ Test loop
 ---------
 You might also need a test loop
 
-.. code-block:: python
+.. testcode::
 
-    class LitModel(pl.LightningModule):
+    class LitModel(LightningModule):
 
         def test_step(self, batch, batch_idx):
             x, y = batch
@@ -177,13 +193,14 @@ However, this time you need to specifically call test (this is done so you don't
     # OPTION 2:
     # test after loading weights
     model = LitModel.load_from_checkpoint(PATH)
-    trainer = Trainer(num_tpu_cores=1)
+    trainer = Trainer(tpu_cores=1)
     trainer.test()
 
 Again, under the hood, lightning does the following in (pseudocode):
 
 .. code-block:: python
 
+    torch.set_grad_enabled(False)
     model.eval()
     test_outs = []
     for test_batch in model.test_dataloader:
@@ -224,10 +241,10 @@ Without changing a SINGLE line of your code, you can now do the following with t
     # train on TPUs using 16 bit precision with early stopping
     # using only half the training data and checking validation every quarter of a training epoch
     trainer = Trainer(
-        nb_tpu_cores=8,
+        tpu_cores=8,
         precision=16,
         early_stop_checkpoint=True,
-        train_percent_check=0.5,
+        limit_train_batches=0.5,
         val_check_interval=0.25
     )
 

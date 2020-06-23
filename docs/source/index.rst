@@ -13,6 +13,7 @@ PyTorch Lightning Documentation
 
    new-project
    introduction_guide
+   performance
 
 .. toctree::
    :maxdepth: 2
@@ -20,9 +21,10 @@ PyTorch Lightning Documentation
    :caption: Python API
 
    callbacks
-   hooks
    lightning-module
    loggers
+   metrics
+   hooks
    trainer
 
 .. toctree::
@@ -31,6 +33,8 @@ PyTorch Lightning Documentation
    :caption: Community Examples
 
    Contextual Emotion Detection (DoubleDistilBert) <https://github.com/PyTorchLightning/emotion_transformer>
+   Cotatron: Transcription-Guided Speech Encoder <https://github.com/mindslab-ai/cotatron>
+   FasterRCNN object detection + Hydra <https://github.com/PyTorchLightning/wheat>
    Generative Adversarial Network <https://colab.research.google.com/drive/1F_RNcHzTfFuQf-LeKvSlud6x7jXYkG31#scrollTo=TyYOdg8g77P0>
    Hyperparameter optimization with Optuna <https://github.com/optuna/optuna/blob/master/examples/pytorch_lightning_simple.py>
    Image Inpainting using Partial Convolutions <https://github.com/ryanwongsa/Image-Inpainting>
@@ -50,6 +54,14 @@ PyTorch Lightning Documentation
    :caption: Tutorials
 
    From PyTorch to PyTorch Lightning <https://towardsdatascience.com/from-pytorch-to-pytorch-lightning-a-gentle-introduction-b371b7caaf09>
+   Video on how to refactor PyTorch into PyTorch Lightning <https://www.youtube.com/watch?v=QHww1JH7IDU>
+
+.. toctree::
+   :maxdepth: 1
+   :name: project structure
+   :caption: Recommended Lightning Project Layout
+
+   Lightning project seed <https://github.com/PyTorchLightning/pytorch-lightning-conference-seed>
 
 .. toctree::
    :maxdepth: 1
@@ -104,10 +116,11 @@ Indices and tables
 .. toctree::
    :hidden:
 
-   pytorch_lightning.core
-   pytorch_lightning.callbacks
-   pytorch_lightning.loggers
-   pytorch_lightning.overrides
-   pytorch_lightning.profiler
-   pytorch_lightning.trainer
-   pytorch_lightning.utilities
+   api/pytorch_lightning.core
+   api/pytorch_lightning.callbacks
+   api/pytorch_lightning.loggers
+   api/pytorch_lightning.metrics
+   api/pytorch_lightning.overrides
+   api/pytorch_lightning.profiler
+   api/pytorch_lightning.trainer
+   api/pytorch_lightning.utilities
